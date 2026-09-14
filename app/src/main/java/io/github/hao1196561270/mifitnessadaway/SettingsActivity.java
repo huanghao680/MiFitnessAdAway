@@ -178,9 +178,16 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
         TextView summaryHint = new TextView(this);
         summaryHint.setTextSize(12);
         summaryHint.setTextColor(subTextColor());
-        summaryHint.setPadding(dp(16), 0, dp(16), dp(10));
-        summaryHint.setText("「调试日志」「隐藏桌面图标」不受总开关影响");
+        summaryHint.setPadding(dp(16), 0, dp(16), dp(2));
+        summaryHint.setText("「调试日志」「隐藏桌面图标」「勿扰同步」不受总开关影响");
         topCard.addView(summaryHint);
+
+        TextView dndHint = new TextView(this);
+        dndHint.setTextSize(12);
+        dndHint.setTextColor(subTextColor());
+        dndHint.setPadding(dp(16), 0, dp(16), dp(10));
+        dndHint.setText("勿扰同步需先在系统设置给运动健康授予「勿扰访问权限」，否则手机侧不会随手环切换");
+        topCard.addView(dndHint);
 
         LinearLayout masterBox = new LinearLayout(this);
         masterBox.setOrientation(LinearLayout.VERTICAL);
@@ -204,6 +211,7 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
         });
         addGroup(root, "设备页", new String[][]{
                 {"设备红点（底部tab/系统设置入口）", Prefs.KEY_ENABLE_DEVICE_RED_DOT},
+                {"勿扰同步（手机 ↔ 手环）", Prefs.KEY_ENABLE_DND_SYNC},
         });
         addGroup(root, "健康详情页", new String[][]{
                 {"健康问诊卡片（睡眠/心率/血氧/压力）", Prefs.KEY_ENABLE_HEALTH_CONSULT},
@@ -450,8 +458,10 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
                     if (Prefs.KEY_HIDE_ICON.equals(e.getKey())) {
                         // 开关语义=「隐藏图标」：图标显示(TRUE)时开关应 OFF
                         e.getValue().setChecked(!isLauncherIconEnabled());
-                    } else if (Prefs.KEY_ENABLE_FACE_EXPORT.equals(e.getKey())) {
-                        // 实验开关默认关闭
+                    } else if (Prefs.KEY_ENABLE_FACE_EXPORT.equals(e.getKey())
+                            || Prefs.KEY_ENABLE_DND_SYNC.equals(e.getKey())) {
+                        // 实验/独立开关默认关闭：必须显式取 false，否则回填成 ON，
+                        // 与 hook 侧（同样默认 false）不一致，界面会"骗人"
                         e.getValue().setChecked(sp.getBoolean(e.getKey(), false));
                     } else {
                         e.getValue().setChecked(sp.getBoolean(e.getKey(), true));

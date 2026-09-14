@@ -1,5 +1,41 @@
 # Changelog 更新日志
 
+## v1.2.0 (versionCode 31)
+
+### English
+
+**New: Band ↔ phone DND sync restored on Android 15+**
+The official sync silently stopped working on Android 15 and later: `ZenUtils.isSupportZenMode()` returns `false` outright when `SDK_INT >= 35`, and `registerZenListener` / `unRegisterZenListener` / `postSetZenMode` are all gated by it — so neither the phone-to-band nor the band-to-phone direction ran, and the DND entry in device settings went dead with it. A new toggle (16 → 17, default off) turns this back on:
+
+- `ZenUtils.isSupportZenMode` is allowed to return `true`, so the whole chain works again
+- after `FitnessApp.onCreate`, the `zen_mode` content observer is re-registered (unregister first, so it does not stack up) — the app's own registration happens before the gate is lifted, so it never took effect
+- the sync switch itself is held on: reads of `DeviceSettingsPreference.isZenModeOpen(did)` return `true`, and writes that try to turn it off are swallowed
+- once at startup the band's rules are pulled back (`getDeviceZenRules`), which is what makes the band-to-phone direction work
+
+**Verified on device** (Redmi K70 Ultra / Android 16 / Mi Fitness 3.59.1): phone → band follows, and band → phone follows as well.
+
+**Note**
+- Mi Fitness must be granted notification-policy access (DND access) in system settings; the module only hints about it, since the permission is enforced by the system.
+- The band-to-phone direction is pulled once at app startup: changing DND on the band reaches the phone after the next Mi Fitness launch. Phone-to-band is instant (driven by a content observer).
+
+### 中文
+
+**新增：Android 15+ 上恢复手环 ↔ 手机勿扰同步**
+官方同步在 Android 15 及以后悄悄失效了：`ZenUtils.isSupportZenMode()` 在 `SDK_INT >= 35` 时直接返回 `false`，而 `registerZenListener` / `unRegisterZenListener` / `postSetZenMode` 全都被它门控——于是两个方向都不再工作，设备设置里的勿扰入口也一起失效。新增开关（16 → 17 个，默认关闭）把它恢复：
+
+- 放行 `ZenUtils.isSupportZenMode` 返回 `true`，整条链路重新生效
+- `FitnessApp.onCreate` 之后重新挂上 `zen_mode` 内容观察者（先 unRegister 再 register，避免重复叠加）——App 自己那次注册发生在放行之前，等于没生效
+- 同步开关保持开启：读 `DeviceSettingsPreference.isZenModeOpen(did)` 恒为 `true`，试图关闭的写入被吞掉
+- 启动时主动拉取一次手环侧规则（`getDeviceZenRules`），这是"手环 → 手机"方向能生效的关键
+
+**真机验证**（Redmi K70 至尊版 / Android 16 / 运动健康 3.59.1）：手机 → 手环跟随正常，手环 → 手机同样跟随正常。
+
+**说明**
+- 需要在系统设置里给运动健康授予「勿扰访问权限」；该权限由系统校验，模块只做提示、不代揉。
+- 手环 → 手机方向在 App 启动时拉取一次：在手环上改勿扰后，下次启动运动健康即同步到手机；手机 → 手环是即时的（内容观察者驱动）。
+
+---
+
 ## v1.1.0 (versionCode 30)
 
 ### English

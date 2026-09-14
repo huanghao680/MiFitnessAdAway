@@ -227,6 +227,10 @@ public class AdAwayModule extends XposedModule {
         if (Prefs.enabled(mPrefs, Prefs.KEY_ENABLE_VIP_POPUP)) {
             hookVipPopup(cl);
         }
+        // 手环/手机勿扰同步（独立开关，默认关；按约定不受总开关约束）
+        if (dndSync()) {
+            hookDndSync(cl);
+        }
     }
 
     // ===================== banner 数据 getter（总开关） =====================
@@ -2190,6 +2194,186 @@ public class AdAwayModule extends XposedModule {
             log(Log.ERROR, TAG, "dismiss callback: no zero-arg method on " + fn0.getName());
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "dismiss callback failed", t);
+        }
+    }
+
+    // ===================== 手环 / 手机勿扰同步 =====================
+
+    /** 勿扰同步是否开启（独立开关，默认关；按约定不受总开关约束） */
+    private boolean dndSync() {
+        return Prefs.isEnabled(mPrefs, Prefs.KEY_ENABLE_DND_SYNC, false);
+    }
+
+    /**
+     * 恢复并保持官方「手环 ↔ 手机勿扰同步」。
+     *
+     * 为什么这个功能会"消失"（3.59.x 源码实锤）：
+     *   ZenUtils.isSupportZenMode() 开头就是 `boolean z = Build.VERSION.SDK_INT >= 35;
+     *   if (!z) { ...查设备 QUIET_MODE 能力... } return false;`
+     *   —— Android 15+ 直接返回 false。而 registerZenListener / unRegisterZenListener /
+     *   postSetZenMode 全都以它为门控 → 于是 Android 15/16 上手环勿扰与手机勿扰
+     *   彻底不同步（设备页的勿扰入口也一起失效）。
+     *
+     * 官方链路：设备页「勿扰模式」开关 → 需要运动健康持有「勿扰访问权限」
+     *   → ZenUtils.setZenModeSyncWithPhone(true) → ZenModeSyncHelper.setZenRule /
+     *   getDeviceZenRules 建立同步；之后靠 ContentObserver
+     *   （Settings.Global "zen_mode"）双向实时同步。
+     *
+     * 本模块做三件事（前两件对应"恢复"，第三件对应"保持"）：
+     *   1) isSupportZenMode → true：解除 Android 15+ 的硬开关，链路重新生效；
+     *   2) FitnessApp.onCreate 后延时重新挂上观察者：App 启动时虽会调
+     *      registerZenListener，但在我们放行之前它被 isSupportZenMode 挡掉了，
+     *      重新 register 一次保证 zen_mode 观察者真的在跑（先 unRegister 再
+     *      register，避免重复注册）；
+     *   3) isZenModeOpen 读写双管：读恒 true 让同步闸门打开，写路径吞掉 false
+     *      防止 App 因缺权限或设备事件把它回写为关。
+     *
+     * 前提：运动健康需在系统设置获得「勿扰访问权限」（system_server 校验，
+     * 模块绕不过；未授权时手环侧仍跟随手机勿扰，手机侧不会被子环控制）。
+     *
+     * 说明：另一处常见做法是转发 mainSystemHandler 的 id=42 数据包，但 3.59.x 的
+     * DeviceSettingsComponent.handlePacket 自己就会处理 id=42 并调用
+     * handleDeviceSettingDnd，故不再重复转发。
+     */
+    private void hookDndSync(ClassLoader cl) throws Throwable {
+        String prefCls = "com.xiaomi.fitness.devicesettings.utils.DeviceSettingsPreference";
+        String zenCls = "com.xiaomi.fitness.devicesettings.utils.ZenUtils";
+
+        // 注意：这条链路的类（DeviceSettingsPreference / ZenUtils / FitnessApp）静态初始化
+        // 依赖 Application 上下文，onPackageReady 阶段还没有 —— 必须 initialize=false，
+        // 强制 <clinit> 会抛异常导致 hook 装不上，交给 App 自己在其生命周期里初始化。
+        // 1) 解除 Android 15+ 的硬开关：让 App 认为设备支持勿扰同步
+        tryHook(zenCls + ".isSupportZenMode (dnd support on)", () -> {
+            Class<?> clazz = Class.forName(zenCls, false, cl);
+            Class<?> deviceModel = Class.forName(
+                    "com.xiaomi.fitness.device.manager.export.WearableDeviceModel", false, cl);
+            Method m = clazz.getDeclaredMethod("isSupportZenMode", deviceModel);
+            m.setAccessible(true);
+            hook(m).intercept(chain -> {
+                if (!dndSync()) {
+                    return chain.proceed();
+                }
+                return true;
+            });
+        });
+
+        // 2) 读路径：让 App 认为「勿扰同步」已开启
+        tryHook(prefCls + ".isZenModeOpen (dnd sync on)", () -> {
+            Class<?> clazz = Class.forName(prefCls, false, cl);
+            Method m = clazz.getDeclaredMethod("isZenModeOpen", String.class);
+            m.setAccessible(true);
+            hook(m).intercept(chain -> {
+                if (!dndSync()) {
+                    return chain.proceed();
+                }
+                return true;
+            });
+        });
+
+        // 3) 写路径：吞掉「关闭」写入，避免被回写成关
+        tryHook(prefCls + ".isZenModeOpen(did,false) (dnd sync keep-on)", () -> {
+            Class<?> clazz = Class.forName(prefCls, false, cl);
+            Method m = clazz.getDeclaredMethod("isZenModeOpen", String.class, boolean.class);
+            m.setAccessible(true);
+            hook(m).intercept(chain -> {
+                if (dndSync() && Boolean.FALSE.equals(chain.getArg(1))) {
+                    if (debugLog()) {
+                        log(Log.INFO, TAG, "dnd sync: blocked turn-off");
+                    }
+                    return null;
+                }
+                return chain.proceed();
+            });
+        });
+
+        // 4) App 启动后补挂 zen_mode 观察者（放行 isSupportZenMode 之后它才注册得上），
+        //    并主动拉一次手环侧规则，补齐「手环改勿扰 → 手机跟随」这个方向
+        tryHook("FitnessApp.onCreate (dnd observer re-register)", () -> {
+            Class<?> app = Class.forName("com.xiaomi.fitness.FitnessApp", false, cl);
+            Method onCreate = app.getDeclaredMethod("onCreate");
+            onCreate.setAccessible(true);
+            final Class<?> zenUtils = Class.forName(zenCls, false, cl);
+            final Class<?> syncHelper = Class.forName(
+                    "com.xiaomi.fitness.devicesettings.common.zenmode.ZenModeSyncHelper", false, cl);
+            hook(onCreate).intercept(chain -> {
+                Object result = chain.proceed();
+                if (dndSync()) {
+                    scheduleDndObserverReregister(zenUtils, syncHelper);
+                }
+                return result;
+            });
+        });
+
+        logDndPermission();
+    }
+
+    /**
+     * 延时 10 秒补挂勿扰观察者：等设备信息就绪，先 unRegister 再 register 防重复；
+     * 随后主动拉一次手环侧勿扰规则（getDeviceZenRules），把「手环改勿扰」这个方向
+     * 也接上——App 官方只在进「设备设置」页时才拉，不拉就永远不会主动问手环。
+     */
+    private void scheduleDndObserverReregister(final Class<?> zenUtils, final Class<?> syncHelper) {
+        try {
+            new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    if (!dndSync()) {
+                        return;
+                    }
+                    try {
+                        Object instance = zenUtils.getField("INSTANCE").get(null);
+                        if (instance == null) {
+                            return;
+                        }
+                        try {
+                            Method un = zenUtils.getDeclaredMethod("unRegisterZenListener");
+                            un.setAccessible(true);
+                            un.invoke(instance);
+                        } catch (Throwable t) {
+                            if (debugLog()) {
+                                log(Log.INFO, TAG, "dnd unregister skipped: " + t.getMessage());
+                            }
+                        }
+                        Method reg = zenUtils.getDeclaredMethod("registerZenListener");
+                        reg.setAccessible(true);
+                        reg.invoke(instance);
+                        log(Log.INFO, TAG, "dnd sync: zen listener re-registered");
+                    } catch (Throwable t) {
+                        log(Log.ERROR, TAG, "dnd listener re-register failed", t);
+                    }
+                    // 反向补拉：把手机侧规则按手环现状对齐（非 suspend，可安全直接调）
+                    try {
+                        Context ctx = targetContext();
+                        Object helper = syncHelper.getField("INSTANCE").get(null);
+                        Method pull = syncHelper.getDeclaredMethod("getDeviceZenRules", Context.class);
+                        pull.setAccessible(true);
+                        pull.invoke(helper, ctx);
+                        log(Log.INFO, TAG, "dnd sync: pulled device zen rules");
+                    } catch (Throwable t) {
+                        log(Log.ERROR, TAG, "dnd pull device rules failed", t);
+                    }
+                }
+            }, 10000L);
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "dnd re-register schedule failed", t);
+        }
+    }
+
+    /** 勿扰访问权限由系统校验，模块只能提示不能代办 */
+    private void logDndPermission() {
+        try {
+            Context ctx = targetContext();
+            if (ctx == null) {
+                return;
+            }
+            NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
+            boolean granted = nm != null && nm.isNotificationPolicyAccessGranted();
+            log(Log.INFO, TAG, "dnd sync hooked, notification policy access granted=" + granted);
+            if (!granted) {
+                log(Log.WARN, TAG, "dnd sync needs DND access: grant it to Mi Fitness in system settings");
+            }
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "dnd permission check failed", t);
         }
     }
 }

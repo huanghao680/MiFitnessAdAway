@@ -4,7 +4,7 @@ English | [中文](README_zh.md)
 
 An LSPosed module that removes ads and promotion popups from **Xiaomi Mi Fitness / 小米运动健康** (`com.mi.health`, and the international build `com.xiaomi.wearable`), built on the modern **libxposed API 102**.
 
-> **v1.1.0, verified on device** — OnePlus PLQ110 / Android 16 / KernelSU / LSPosed 2.1.1: every page below stays clean, all normal features work, trial watchfaces export for third-party import.
+> **v1.2.0, verified on device** — Redmi K70 Ultra / Android 16 / Mi Fitness 3.59.1 (and OnePlus PLQ110 for earlier releases): every page below stays clean, all normal features work, trial watchfaces export for third-party import, and band ↔ phone DND sync works again.
 
 ## What it removes
 
@@ -24,7 +24,7 @@ Grouped the same way as the settings cards, so you can find a switch by the scre
 
 ## Settings UI
 
-One in-app screen, 16 toggles, no external config needed.
+One in-app screen, 17 toggles, no external config needed.
 
 | Card | Switches |
 |---|---|
@@ -32,19 +32,20 @@ One in-app screen, 16 toggles, no external config needed.
 | Splash & popups | splash ads · app-update dialog · VIP promo popup |
 | Mine | VIP membership card · doctor consultation card |
 | Sport | carousel cards · operation cards below "training index" |
-| Device | red dots (bottom tab + system settings entry) |
+| Device | red dots (bottom tab + system settings entry) · DND sync (phone ↔ band) |
 | Health detail | consultation cards (Sleep / Heart rate / SpO₂ / Stress) · sleep research/improvement cards · weight plan card |
 | Watchface | trial watchface auto-export (experimental, off by default) |
 | Other | anti-hook detection · debug log · **hide launcher icon** (applies instantly) |
 
 - Tap a group title to collapse/expand it — the state is remembered.
 - Switch changes take effect after restarting Mi Fitness; no reboot.
-- While the master switch is off, every switch that depends on it is dimmed and not tappable. Debug log and hide-icon stay usable (they are not gated by the master).
+- While the master switch is off, every switch that depends on it is dimmed and not tappable. Debug log, hide-icon and DND sync stay usable (they are not gated by the master).
 - Follows the system dark/light theme.
 
 ## Extras
 
 - **Trial watchface auto-export (experimental)** — after a trial download finishes, the cached `resource.bin` is re-ID'd (`12→19` prefix, same length) and written to `Download/` under its Chinese name, ready for third-party import (verified with AstroBox on Xiaomi Smart Band 10 Pro). Exported IDs are filtered out of the server-side cleanup list so sideloaded faces survive sync, and the exported cache is cleaned up on the next scan (snapshot-based, with handoff/push guards). Every scan reports via Toast/notification.
+- **Band ↔ phone DND sync (Android 15+)** — the official sync is dead on Android 15 and later because `ZenUtils.isSupportZenMode()` returns `false` unconditionally there and gates the whole chain. With this toggle the gate is lifted, the `zen_mode` content observer is re-registered after app start, the sync flag is held on, and the band's rules are pulled once at startup. Needs DND (notification-policy) access for Mi Fitness, which the module can only remind you about — the system enforces it.
 - **Hide launcher icon** — instantly hides the module's own icon; its settings page stays reachable from LSPosed.
 - **Debug log** — verbose hook logging for troubleshooting.
 
@@ -56,6 +57,7 @@ One in-app screen, 16 toggles, no external config needed.
 - **Device red dots**: `PowerManager.isIgnoringBatteryOptimizations` is faked to `true` (equivalent to "battery optimization ignored"), plus the face-entrance red-dot getters return `false` — that clears both the bottom-tab dot and the home "System settings" entry dot.
 - **Popups**: `AppUpgradeUtil.showUpdateDialogIfNeed` is skipped for the update prompt; `MembershipDialogManager.showMembershipExpiredFaceDialog` is skipped for the VIP promo popup, while still invoking the caller's dismiss callback so the birthday-medal flow it continues is left intact. A user-initiated purchase dialog is untouched.
 - **Version tolerance**: every hook installs independently and fails in isolation, so entry points that differ on a given app version are skipped gracefully while the rest keep working.
+- **Late-initialized classes**: classes whose static initializer needs the `Application` context (`DeviceSettingsPreference`, `ZenUtils`, `FitnessApp`) are loaded with `initialize = false`, because forcing the initializer during hook installation throws and would leave the hook uninstalled.
 
 ## Requirements
 
