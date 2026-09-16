@@ -1581,6 +1581,8 @@ public class AdAwayModule extends XposedModule {
             return;
         }
         try {
+            // 设置页换过位置（并选择重导）→ 先清标记，让已有表盘重新落一份到新位置
+            consumeExportResetToken();
             File root = watchFaceRoot();
             if (root == null) {
                 return;
@@ -1624,6 +1626,118 @@ public class AdAwayModule extends XposedModule {
     /** 已导出 ID 的跨进程记录（目标 App 自有 prefs；RemotePreferences 在目标进程只读） */
     private static final String PREF_EXPORTED_IDS = "exported_face_ids"; // 老 CSV 格式，只读迁移
     private static final String PREF_EXPORTED_ID_SET = "exported_face_id_set";
+    /** 去重标记对应的导出位置：位置变了，同一批标记要视为"未导出" */
+    private static final String PREF_EXPORTED_LOCATION = "exported_face_location";
+    /** 已消费的"重导"信号值 */
+    private static final String PREF_EXPORT_RESET_SEEN = "export_reset_seen";
+
+    /** 导出的默认位置（公共存储下的相对路径） */
+    private static final String DEFAULT_EXPORT_PATH = "Download";
+
+    /**
+     * MediaStore Files 集合对第三方 App 允许的首级目录。
+     * 实机实证（Android 16，运动健康 uid 写入报错）：
+     *   Primary directory MiFitnessExport not allowed for content://media/external/file;
+     *   allowed directories are [Download, Documents]
+     * 注意 adb shell 能写任意目录是因为 shell 身份绕过了该白名单，App 侧不行，
+     * 所以这里必须按白名单校验，非法首级目录回退 Download。
+     */
+    private static final String[] ALLOWED_EXPORT_ROOTS = {"Download", "Documents"};
+
+    /**
+     * 当前导出位置（相对公共存储的路径）。规则：
+     * - 默认 Download；空/非法一律回落默认
+     * - 首级目录必须在 ALLOWED_EXPORT_ROOTS 里（否则整体回退 Download）
+     * - 去掉首尾斜杠、把反斜杠归一成斜杠、剔除每级里的非法字符
+     * - 拒绝绝对路径（去掉开头的 / 后仍按相对路径处理）与 . / ..
+     * 例如 "Download/表盘导出"、"Documents/2026/表盘"。
+     */
+    private String exportPath() {
+        String v = mPrefs == null ? null : mPrefs.getString(Prefs.KEY_EXPORT_PATH, DEFAULT_EXPORT_PATH);
+        if (v == null) {
+            return DEFAULT_EXPORT_PATH;
+        }
+        v = v.trim().replace("\\", "/");
+        StringBuilder sb = new StringBuilder();
+        for (String seg : v.split("/")) {
+            String s = seg.trim();
+            if (s.isEmpty() || s.equals(".") || s.equals("..")) {
+                continue;
+            }
+            // 去掉路径分隔与常见非法字符，避免 MediaStore 建出怪目录
+            s = s.replaceAll("[\\\\:*?\"<>|\\x00-\\x1f]", "_");
+            if (s.isEmpty()) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append('/');
+            }
+            sb.append(s);
+        }
+        String out = sb.toString();
+        if (out.isEmpty()) {
+            return DEFAULT_EXPORT_PATH;
+        }
+        // 首级目录白名单校验：不允许的一律回退默认，避免 MediaStore 抛 IllegalArgumentException
+        String root = out.split("/")[0];
+        boolean rootOk = false;
+        for (String allowed : ALLOWED_EXPORT_ROOTS) {
+            if (allowed.equals(root)) {
+                rootOk = true;
+                break;
+            }
+        }
+        if (!rootOk) {
+            log(Log.WARN, TAG, "export root not allowed: " + root + ", falling back to "
+                    + DEFAULT_EXPORT_PATH);
+            return DEFAULT_EXPORT_PATH;
+        }
+        // 限制层级，避免用户误填超长路径
+        String[] parts = out.split("/");
+        if (parts.length > 6) {
+            StringBuilder trimmed = new StringBuilder();
+            for (int i = 0; i < 6; i++) {
+                if (i > 0) {
+                    trimmed.append('/');
+                }
+                trimmed.append(parts[i]);
+            }
+            out = trimmed.toString();
+        }
+        return out;
+    }
+
+    /** 给人看的导出位置，与写盘用的相对路径一致 */
+    private String exportLocationLabel() {
+        return exportPath();
+    }
+
+    /**
+     * 换位置后的重导：设置页把 KEY_EXPORT_RESET_TOKEN 递增作为跨进程信号
+     * （标记存在目标 App 自己的 prefs 里，模块 App 写不到）。这里发现信号
+     * 变了就清空已导出标记，让已有表盘重新落一份到新位置。
+     */
+    private void consumeExportResetToken() {
+        try {
+            SharedPreferences sp = exportPrefs();
+            if (sp == null) {
+                return;
+            }
+            int token = mPrefs == null ? 0 : mPrefs.getInt(Prefs.KEY_EXPORT_RESET_TOKEN, 0);
+            int seen = sp.getInt(PREF_EXPORT_RESET_SEEN, 0);
+            if (token == seen) {
+                return;
+            }
+            sp.edit().remove(PREF_EXPORTED_ID_SET).remove(PREF_EXPORTED_IDS)
+                    .putInt(PREF_EXPORT_RESET_SEEN, token).apply();
+            synchronized (exportedFaces) {
+                exportedFaces.clear();
+            }
+            log(Log.INFO, TAG, "export marks reset for new location: " + exportLocationLabel());
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "reset export marks failed", t);
+        }
+    }
 
     private SharedPreferences exportPrefs() {
         Context ctx = targetContext();
@@ -1656,20 +1770,33 @@ public class AdAwayModule extends XposedModule {
             if (!set.add(newId)) {
                 return; // 已标记
             }
-            // 写新 Set 格式并清掉老 CSV（老数据已并入 set，不丢失）
-            sp.edit().putStringSet(PREF_EXPORTED_ID_SET, set).remove(PREF_EXPORTED_IDS).apply();
+            // 写新 Set 格式 + 记录当前位置（去重按位置判定），并清掉老 CSV（已并入 set，不丢失）
+            sp.edit().putStringSet(PREF_EXPORTED_ID_SET, set)
+                    .putString(PREF_EXPORTED_LOCATION, exportPath())
+                    .remove(PREF_EXPORTED_IDS).apply();
             log(Log.INFO, TAG, "marked exported: " + newId);
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "mark exported failed", t);
         }
     }
 
-    /** 本次扫描开始前的已标记集合快照（清理只认快照里的，避免误删刚导出的） */
+    /**
+     * 本次扫描开始前的已标记集合快照（清理只认快照里的，避免误删刚导出的）。
+     * 去重按位置判定：标记里记录的位置与当前导出位置不一致（或位置变了但
+     * 标记没来得及带上位置）→ 视为"未导出过"，返回空集，让它们重新导出到新位置；
+     * 注意清理逻辑也用这个快照，所以换位置后不会立刻误删缓存。
+     */
     private Set<String> snapshotExportedMarks() {
         Set<String> set = new HashSet<>();
         try {
             SharedPreferences sp = exportPrefs();
             if (sp == null) {
+                return set;
+            }
+            String markedAt = sp.getString(PREF_EXPORTED_LOCATION, null);
+            if (markedAt != null && !markedAt.equals(exportPath())) {
+                log(Log.INFO, TAG, "export location changed (" + markedAt + " -> "
+                        + exportPath() + "), marks treated as empty");
                 return set;
             }
             Set<String> saved = sp.getStringSet(PREF_EXPORTED_ID_SET, null);
@@ -1750,7 +1877,8 @@ public class AdAwayModule extends XposedModule {
             String tail = cleaned > 0 ? "；顺手清了 " + cleaned + " 个旧缓存" : "";
             if (fresh > 0) {
                 title = "表盘导出成功";
-                text = "新增 " + fresh + " 张 → Download/，去第三方软件导入开刷" + tail;
+                text = "新增 " + fresh + " 张 → " + exportLocationLabel()
+                        + "/，去第三方软件导入开刷" + tail;
             } else {
                 title = "表盘导出";
                 text = "无新增（缓存 " + found + " 张均已导出），试用新表盘后再来" + tail;
@@ -2013,23 +2141,36 @@ public class AdAwayModule extends XposedModule {
     }
 
     /**
-     * 写 Download/：API29+ 走 MediaStore（免权限写自有文件），
-     * 低版本回退直接写 Download 目录；同名已存在则跳过（跨进程去重）。
+     * 写入用的 MediaStore 集合：统一走 Files 集合（content://media/external/file）。
+     * 实测（Android 16）它能配合 relative_path 建出任意层级目录（含中文），
+     * 而 Downloads 集合只认 Download 前缀、Images 集合拒绝非图片 MIME，
+     * 所以位置一旦可自由配置，就只有 Files 集合通吃。
+     */
+    private Uri collectionFor(String relPath) {
+        return MediaStore.Files.getContentUri("external");
+    }
+
+    /**
+     * 写导出目录：API29+ 走 MediaStore Files 集合（免权限写公共存储），
+     * 低版本回退直接写公共目录；同名已存在则跳过（跨进程去重）。
+     * 位置由设置项 exportPath 决定，支持多级与中文。
      */
     private Object writeToDownload(String fileName, byte[] data) throws Throwable {
         Context ctx = targetContext();
         if (ctx == null) {
             throw new RuntimeException("target context null");
         }
+        final String relPath = exportPath();
         if (Build.VERSION.SDK_INT >= 29) {
             ContentResolver cr = ctx.getContentResolver();
-            Uri coll = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+            Uri coll = collectionFor(relPath);
             Cursor c = null;
             try {
                 c = cr.query(coll, new String[]{"_id"},
-                        "_display_name=?", new String[]{fileName}, null);
+                        "_display_name=? AND relative_path=?",
+                        new String[]{fileName, relPath}, null);
                 if (c != null && c.moveToFirst()) {
-                    log(Log.INFO, TAG, "face export skip: already in Download");
+                    log(Log.INFO, TAG, "face export skip: already in " + relPath);
                     return null;
                 }
             } finally {
@@ -2044,10 +2185,10 @@ public class AdAwayModule extends XposedModule {
             ContentValues cv = new ContentValues();
             cv.put("_display_name", fileName);
             cv.put("mime_type", "application/octet-stream");
-            cv.put("relative_path", "Download");
+            cv.put("relative_path", relPath);
             Uri uri = cr.insert(coll, cv);
             if (uri == null) {
-                throw new RuntimeException("mediastore insert null");
+                throw new RuntimeException("mediastore insert null: " + relPath);
             }
             OutputStream out = null;
             try {
@@ -2067,11 +2208,14 @@ public class AdAwayModule extends XposedModule {
             }
             return uri;
         }
-        File dir = Environment.getExternalStoragePublicDirectory(
-                Environment.DIRECTORY_DOWNLOADS);
+        File dir = new File(Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_DOWNLOADS).getParentFile(), relPath);
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            log(Log.ERROR, TAG, "export dir create failed: " + dir.getAbsolutePath());
+        }
         File out = new File(dir, fileName);
         if (out.isFile()) {
-            log(Log.INFO, TAG, "face export skip: already in Download");
+            log(Log.INFO, TAG, "face export skip: already in " + relPath);
             return null;
         }
         FileOutputStream fos = new FileOutputStream(out);

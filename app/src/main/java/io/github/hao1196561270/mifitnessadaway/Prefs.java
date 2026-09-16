@@ -19,6 +19,18 @@ public final class Prefs {
     public static final String KEY_ENABLE_SLEEP_CARDS = "enable_sleep_cards";
     public static final String KEY_ENABLE_DEVICE_RED_DOT = "enable_device_red_dot";
     public static final String KEY_ENABLE_FACE_EXPORT = "enable_face_export";
+    /**
+     * 导出位置：相对公共存储的路径，允许多级与中文，如 "Download/表盘导出"、
+     * "MiFitnessExport/2026/表盘"；默认 "Download"。写入走 MediaStore Files 集合
+     * （免权限），非法字符与绝对路径在读取时剔除。
+     */
+    public static final String KEY_EXPORT_PATH = "export_path";
+    /**
+     * 「重导」信号：设置页换位置并选择重导时 +1；目标进程发现它变化就清掉
+     * 已导出标记，让已有表盘重新落一份到新位置（标记存在目标 App 自己的
+     * prefs 里，模块 App 写不到，只能靠这个信号跨进程通知）。
+     */
+    public static final String KEY_EXPORT_RESET_TOKEN = "export_reset_token";
     public static final String KEY_ENABLE_SPLASH = "enable_splash";
     public static final String KEY_ENABLE_APP_UPDATE = "enable_app_update";
     public static final String KEY_ENABLE_WEIGHT_PLAN = "enable_weight_plan";

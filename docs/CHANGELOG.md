@@ -1,5 +1,33 @@
 # Changelog 更新日志
 
+## v1.3.0 (versionCode 32)
+
+### English
+
+**New: configurable export location**
+The watchface export folder is no longer fixed to `Download/` — a new "Export location" row in the Watchface card opens a dialog where a relative path is entered, e.g. `Download/表盘导出` or `Documents/2026/面孔`. Multi-level and Chinese names are fine, and `Reset to default` restores `Download`.
+
+- Allowed first-level folders are `Download` and `Documents`. This is not our choice: MediaStore rejects anything else for third-party apps (`Primary directory X not allowed for content://media/external/file; allowed directories are [Download, Documents]`), so other roots fall back to `Download` with a warning instead of failing mid-export.
+- Deduplication is now location-aware: after the folder changes, previously exported faces are no longer considered exported, so they can land in the new folder — this also removes the old "changed the folder but no file appeared" trap.
+- When the location changes, a dialog asks whether already-exported faces should be re-exported to the new location; the re-export starts the next time the "Mine" page is opened.
+- Writes go through the MediaStore Files collection, so no storage permission is needed, and notification/Toast text now reports the real destination.
+
+**Verified on device** (Android 16): after switching to `Documents/faces`, a real 4.25 MB trial face was exported as `蜘蛛侠超感大眼_190917425583.bin` in the new folder; an unsupported root was rejected and fell back to `Download` instead of throwing.
+
+### 中文
+
+**新增：导出位置可自定义**
+表盘导出目录不再固定为 `Download/` —— 「表盘」卡片新增「导出位置」一行，点开可填相对路径，例如 `Download/表盘导出`、`Documents/2026/面孔`。支持多级与中文，「恢复默认」回到 `Download`。
+
+- 首级目录只允许 `Download` 和 `Documents`。这不是我们的取舍：MediaStore 对第三方 App 只放行这两个（系统报错原文 `Primary directory X not allowed for content://media/external/file; allowed directories are [Download, Documents]`），所以其他首级目录会带提示回退 `Download`，而不是导出中途失败。
+- 去重改为按位置判定：换目录后，之前导出的表盘不再算"已导出"，能正常落到新目录 —— 顺带修掉以前"换了目录却没文件"的坑。
+- 改位置时会问是否把已导出的表盘重新导一份到新位置；选「重新导出」后，下次打开运动健康「我的」页即开始。
+- 写入走 MediaStore Files 集合，全程免存储权限；通知/Toast 文案会显示真实落盘位置。
+
+**真机验证**（Android 16）：切到 `Documents/faces` 后，一张 4.25 MB 的真实试用表盘成功导出为 `蜘蛛侠超感大眼_190917425583.bin`；填了系统不允许的根目录时被拒绝并回退 `Download`，不再抛错。
+
+---
+
 ## v1.2.0 (versionCode 31)
 
 ### English

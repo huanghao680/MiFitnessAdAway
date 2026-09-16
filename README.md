@@ -4,7 +4,7 @@ English | [中文](README_zh.md)
 
 An LSPosed module that removes ads and promotion popups from **Xiaomi Mi Fitness / 小米运动健康** (`com.mi.health`, and the international build `com.xiaomi.wearable`), built on the modern **libxposed API 102**.
 
-> **v1.2.0, verified on device** — Redmi K70 Ultra / Android 16 / Mi Fitness 3.59.1 (and OnePlus PLQ110 for earlier releases): every page below stays clean, all normal features work, trial watchfaces export for third-party import, and band ↔ phone DND sync works again.
+> **v1.3.0, verified on device** — Redmi K70 Ultra / Android 16 / Mi Fitness 3.59.1 (and OnePlus PLQ110 for earlier releases): every page below stays clean, all normal features work, trial watchfaces export for third-party import, and band ↔ phone DND sync works again.
 
 ## What it removes
 
@@ -44,7 +44,7 @@ One in-app screen, 17 toggles, no external config needed.
 
 ## Extras
 
-- **Trial watchface auto-export (experimental)** — after a trial download finishes, the cached `resource.bin` is re-ID'd (`12→19` prefix, same length) and written to `Download/` under its Chinese name, ready for third-party import (verified with AstroBox on Xiaomi Smart Band 10 Pro). Exported IDs are filtered out of the server-side cleanup list so sideloaded faces survive sync, and the exported cache is cleaned up on the next scan (snapshot-based, with handoff/push guards). Every scan reports via Toast/notification.
+- **Trial watchface auto-export (experimental)** — after a trial download finishes, the cached `resource.bin` is re-ID'd (`12→19` prefix, same length) and written under its Chinese name, ready for third-party import (verified with AstroBox on Xiaomi Smart Band 10 Pro). The destination is configurable in settings → Watchface → "Export location": a relative path such as `Download/表盘导出` or `Documents/2026/面孔` (first level limited to `Download` / `Documents`, which is all MediaStore allows third-party apps; anything else falls back to `Download`). Changing the location offers to re-export existing faces there, and deduplication follows the location so the new folder really receives files. Exported IDs are filtered out of the server-side cleanup list so sideloaded faces survive sync, and the exported cache is cleaned up on the next scan (snapshot-based, with handoff/push guards). Every scan reports via Toast/notification, including the real destination.
 - **Band ↔ phone DND sync (Android 15+)** — the official sync is dead on Android 15 and later because `ZenUtils.isSupportZenMode()` returns `false` unconditionally there and gates the whole chain. With this toggle the gate is lifted, the `zen_mode` content observer is re-registered after app start, the sync flag is held on, and the band's rules are pulled once at startup. Needs DND (notification-policy) access for Mi Fitness, which the module can only remind you about — the system enforces it.
 - **Hide launcher icon** — instantly hides the module's own icon; its settings page stays reachable from LSPosed.
 - **Debug log** — verbose hook logging for troubleshooting.

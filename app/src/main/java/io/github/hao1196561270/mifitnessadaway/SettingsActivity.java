@@ -220,7 +220,7 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
         });
         addGroup(root, "表盘", new String[][]{
                 {"表盘自动导出（实验）", Prefs.KEY_ENABLE_FACE_EXPORT},
-        });
+        }, this::addExportLocationRow);
         addGroup(root, "其他", new String[][]{
                 {"反 hook 检测", Prefs.KEY_ENABLE_ANTI_DETECT},
                 {"调试日志", Prefs.KEY_DEBUG_LOG},
@@ -244,6 +244,15 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
      * items 为 {显示名, 设置键} 数组。
      */
     private void addGroup(LinearLayout root, final String groupTitle, String[][] items) {
+        addGroup(root, groupTitle, items, null);
+    }
+
+    /**
+     * 一组开关卡片。extraRows 非空时，在开关行之后追加自定义行
+     * （用于「导出位置」这类点开对话框而非开关的条目）。
+     */
+    private void addGroup(LinearLayout root, final String groupTitle, String[][] items,
+                          ExtraRows extraRows) {
         final SharedPreferences ui = getSharedPreferences(UI_PREFS, MODE_PRIVATE);
         final String collapseKey = "collapsed_" + groupTitle;
 
@@ -277,8 +286,11 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
         for (int i = 0; i < items.length; i++) {
             final String label = items[i][0];
             final String key = items[i][1];
-            final boolean last = (i == items.length - 1);
+            final boolean last = (i == items.length - 1) && extraRows == null;
             addRow(container, label, key, last);
+        }
+        if (extraRows != null) {
+            extraRows.add(container);
         }
         card.addView(container);
 
@@ -299,6 +311,204 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
         });
 
         addCardWithMargin(root, card);
+    }
+
+    /** 卡片内追加自定义行的回调 */
+    private interface ExtraRows {
+        void add(LinearLayout container);
+    }
+
+    /**
+     * 「导出位置」行：右侧显示当前相对路径，点开对话框输入新位置。
+     * 位置是相对公共存储的路径（如 Download/表盘导出），可多级、可中文；
+     * 写入走 MediaStore Files 集合，免权限。
+     */
+    private void addExportLocationRow(LinearLayout container) {
+        // 分隔线（与上一行分隔）
+        View divider = new View(this);
+        divider.setBackgroundColor(dividerColor());
+        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(0.5f)));
+        dlp.leftMargin = dp(16);
+        dlp.rightMargin = dp(16);
+        container.addView(divider, dlp);
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(16), dp(14), dp(16), dp(14));
+        row.setBackgroundColor(Color.TRANSPARENT);
+
+        TextView tv = new TextView(this);
+        tv.setText("导出位置");
+        tv.setTextSize(15);
+        tv.setTextColor(textColor());
+        tv.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(tv);
+
+        final TextView value = new TextView(this);
+        value.setTextSize(14);
+        value.setTextColor(subTextColor());
+        value.setText(currentExportPath());
+        row.addView(value);
+        exportPathView = value;
+
+        row.setClickable(true);
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showExportPathDialog();
+            }
+        });
+        container.addView(row);
+    }
+
+    /** 位置行右侧的当前值（onServiceBind 后刷新） */
+    private TextView exportPathView;
+
+    /** 当前导出位置：未连框架前给默认值，连上后读 RemotePreferences */
+    private String currentExportPath() {
+        if (mService == null) {
+            return "Download";
+        }
+        String v = mService.getRemotePreferences(Prefs.GROUP)
+                .getString(Prefs.KEY_EXPORT_PATH, "Download");
+        return (v == null || v.trim().isEmpty()) ? "Download" : v.trim();
+    }
+
+    /**
+     * 导出位置对话框：一个输入框（相对路径）+ 确定/取消 + 恢复默认。
+     * 改完位置后询问是否把已导出的表盘重新导一份到新位置（重置去重标记，
+     * 通过 KEY_EXPORT_RESET_TOKEN 递增跨进程通知目标进程）。
+     */
+    private void showExportPathDialog() {
+        final android.widget.EditText input = new android.widget.EditText(this);
+        input.setText(currentExportPath());
+        input.setSelection(input.getText().length());
+        input.setHint("例如 Download/表盘导出");
+        input.setSingleLine(true);
+
+        int pad = dp(20);
+        android.widget.FrameLayout box = new android.widget.FrameLayout(this);
+        box.setPadding(pad, dp(8), pad, 0);
+        box.addView(input, new android.widget.FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        new AlertDialog.Builder(this)
+                .setTitle("表盘导出位置")
+                .setMessage("相对内部存储的路径，首级目录只能是 Download 或 Documents，"
+                        + "可多级、可中文。\n"
+                        + "例：Download/表盘导出、Documents/2026/表盘\n"
+                        + "（免权限：走系统媒体库写入；其他首级目录系统不允许，会自动回退 Download）")
+                .setView(box)
+                .setPositiveButton("确定", new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface dialog, int which) {
+                        String oldPath = currentExportPath();
+                        String newPath = normalizeExportPath(input.getText().toString());
+                        if (newPath.equals(oldPath)) {
+                            return;
+                        }
+                        if (mService != null) {
+                            mService.getRemotePreferences(Prefs.GROUP).edit()
+                                    .putString(Prefs.KEY_EXPORT_PATH, newPath).apply();
+                        }
+                        if (exportPathView != null) {
+                            exportPathView.setText(newPath);
+                        }
+                        askReExport(newPath);
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .setNeutralButton("恢复默认", new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface dialog, int which) {
+                        if (mService != null) {
+                            mService.getRemotePreferences(Prefs.GROUP).edit()
+                                    .putString(Prefs.KEY_EXPORT_PATH, "Download").apply();
+                        }
+                        if (exportPathView != null) {
+                            exportPathView.setText("Download");
+                        }
+                        askReExport("Download");
+                    }
+                })
+                .show();
+    }
+
+    /** 换位置后询问是否重导：是 → 递增重导信号，目标进程下次扫描清标记重新导出 */
+    private void askReExport(final String newPath) {
+        new AlertDialog.Builder(this)
+                .setTitle("重新导出？")
+                .setMessage("已导出过的表盘默认不会重复导出。\n"
+                        + "要把它们重新导一份到「" + newPath + "」吗？\n\n"
+                        + "选「重新导出」后，下次打开运动健康“我的”页即开始。")
+                .setPositiveButton("重新导出", new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface dialog, int which) {
+                        if (mService != null) {
+                            android.content.SharedPreferences sp =
+                                    mService.getRemotePreferences(Prefs.GROUP);
+                            int token = sp.getInt(Prefs.KEY_EXPORT_RESET_TOKEN, 0) + 1;
+                            sp.edit().putInt(Prefs.KEY_EXPORT_RESET_TOKEN, token).apply();
+                        }
+                        android.widget.Toast.makeText(SettingsActivity.this,
+                                "已安排重新导出，重启运动健康后打开“我的”页触发",
+                                android.widget.Toast.LENGTH_LONG).show();
+                    }
+                })
+                .setNegativeButton("不用", null)
+                .show();
+    }
+
+    /**
+     * 与 hook 侧同规则地规范化路径：去首尾斜杠、归一斜杠、剔除非法字符与 . / ..，
+     * 并校验首级目录必须在 Download / Documents 里（系统只允许这两个），否则回退 Download。
+     */
+    private String normalizeExportPath(String raw) {
+        if (raw == null) {
+            return "Download";
+        }
+        String v = raw.trim().replace("\\", "/");
+        StringBuilder sb = new StringBuilder();
+        for (String seg : v.split("/")) {
+            String s = seg.trim();
+            if (s.isEmpty() || s.equals(".") || s.equals("..")) {
+                continue;
+            }
+            s = s.replaceAll("[\\\\:*?\"<>|\\x00-\\x1f]", "_");
+            if (s.isEmpty()) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append('/');
+            }
+            sb.append(s);
+        }
+        String out = sb.toString();
+        if (out.isEmpty()) {
+            return "Download";
+        }
+        String root = out.split("/")[0];
+        if (!"Download".equals(root) && !"Documents".equals(root)) {
+            android.widget.Toast.makeText(this,
+                    "首级目录只能是 Download 或 Documents，已回退为 Download",
+                    android.widget.Toast.LENGTH_LONG).show();
+            return "Download";
+        }
+        String[] parts = out.split("/");
+        if (parts.length > 6) {
+            StringBuilder trimmed = new StringBuilder();
+            for (int i = 0; i < 6; i++) {
+                if (i > 0) {
+                    trimmed.append('/');
+                }
+                trimmed.append(parts[i]);
+            }
+            out = trimmed.toString();
+        }
+        return out;
     }
 
     private void applyCollapse(LinearLayout container, TextView arrow, boolean collapsed) {

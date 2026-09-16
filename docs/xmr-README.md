@@ -15,7 +15,7 @@ Remove ads from 小米运动健康 (`com.mi.health/com.xiaomi.wearable` 3.0+) - 
 - Health detail pages consultation cards (Sleep / Heart rate / SpO₂ / Stress) / 健康详情页问诊卡片（睡眠 / 心率 / 血氧 / 压力）
 - Sleep research / improvement cards / 睡眠研究 / 改善卡片
 - Weight page personalized plan card / 体重页个性化减重方案栏
-- Trial watchface auto-export (re-ID'd → Download/, third-party import) + cleanup protection / 试用表盘自动导出（换新 ID → Download/，第三方导入）+ 防删除保护
+- Trial watchface auto-export (re-ID'd, third-party import) + cleanup protection + configurable export location (Download / Documents + subfolders) / 试用表盘自动导出（换新 ID，第三方导入）+ 防删除保护 + 导出位置可自定义（Download / Documents + 子目录）
 - App update dialog ("Update available" prompt) / 应用更新弹窗（"发现新版本"提示）
 - Band ↔ phone DND sync restored on Android 15+ / Android 15+ 恢复手环 ↔ 手机勿扰同步
 - VIP promo popup ("会员限时低价福利" / "抢先购买", shipped unverified) / 会员推广弹窗（"会员限时低价福利"/"抢先购买"，未验证发布）
