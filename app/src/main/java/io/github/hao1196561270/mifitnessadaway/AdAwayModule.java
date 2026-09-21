@@ -62,6 +62,7 @@ public class AdAwayModule extends XposedModule {
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
         mPrefs = getRemotePreferences(Prefs.GROUP);
+        mProcessName = param.getProcessName();
         log(Log.INFO, TAG, "module loaded, process=" + param.getProcessName() +
                 ", api=" + getApiVersion() + ", framework=" + getFrameworkName());
     }
@@ -81,6 +82,10 @@ public class AdAwayModule extends XposedModule {
         try {
             installHooks(param.getClassLoader());
             log(Log.INFO, TAG, "all hooks installed");
+            // 缓存目录哨兵只在主进程起一份（子进程也会读同一份目录，重复起只是浪费）
+            if (mProcessName == null || !mProcessName.contains(":")) {
+                startFaceWatcher();
+            }
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "hook install failed", t);
         }
@@ -1390,6 +1395,15 @@ public class AdAwayModule extends XposedModule {
     /** 最近一次推送发起时间（ms），清理时 15 分钟内有推送则跳过 */
     private volatile long mLastPushMillis;
 
+    /** 缓存目录哨兵是否已启动（每进程一次） */
+    private volatile boolean mFaceWatcherOn;
+
+    /** 哨兵见过的包体签名（名字:长度:mtime），同一份只处理一次 */
+    private final Set<String> mSeenBins = Collections.synchronizedSet(new HashSet<>());
+
+    /** 当前进程名（onModuleLoaded 里拿到；用来只在主进程起哨兵） */
+    private String mProcessName;
+
     /**
      * 表盘自动导出：hook 表盘推送入口 doInstall(path, id, ...)，推送时/开"我的"页时
      * 扫缓存，把 resource.bin 按"12→19"规则换新 ID，原样写一份到 Download/face_<新ID>.bin（中文名_新ID.bin），
@@ -1609,6 +1623,106 @@ public class AdAwayModule extends XposedModule {
      * （推送链路版本漂移时，扫盘依然能兜住）。
      */
     private void exportCachedFaces() {
+        exportCachedFaces(false);
+    }
+
+    /**
+     * 缓存目录哨兵：包体在 &lt;root&gt;/&lt;设备&gt;/&lt;表盘ID&gt;/ 下只停很短时间
+     * （实机：32 位 MD5 命名的包体出现后 1 分钟内被 App 删掉），而推送入口 hook
+     * 在部分机型上根本不被调用（小米手环 8 Pro 实测 0 次），"开我的页扫一次"又赶不上。
+     * 所以不再依赖任何 hook：每 400ms 轻量看一眼目录（只 stat + 查表，不读盘），
+     * 发现没见过的包体先等它落稳（300ms 后长度/mtime 未变）再整盘扫一次读走。
+     */
+    private void startFaceWatcher() {
+        if (mFaceWatcherOn) {
+            return;
+        }
+        mFaceWatcherOn = true;
+        // 无条件打一行：用来确认这版 APK 真的装上了（跟开关无关）
+        log(Log.INFO, TAG, "face watcher armed (poll=400ms)");
+        Thread t = new Thread(() -> {
+            while (true) {
+                try {
+                    if (faceExport()) {
+                        File hit = findFreshBin();
+                        if (hit != null) {
+                            log(Log.INFO, TAG, "face watcher: new bin " + hit.getName()
+                                    + " " + hit.length() + "B -> " + hit.getParentFile().getName());
+                            exportCachedFaces(true);
+                        }
+                    }
+                } catch (Throwable t2) {
+                    log(Log.ERROR, TAG, "face watcher error", t2);
+                }
+                try {
+                    Thread.sleep(400);
+                } catch (InterruptedException ie) {
+                    return;
+                }
+            }
+        }, "mfaa-face-watch");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /** 轻量探测：有没有还没处理过的缓存包体。只做 stat，不读文件内容 */
+    private File findFreshBin() {
+        File root = watchFaceRoot();
+        if (root == null) {
+            return null;
+        }
+        File[] dids = root.listFiles();
+        if (dids == null) {
+            return null;
+        }
+        for (File did : dids) {
+            if (!did.isDirectory()) {
+                continue;
+            }
+            File[] faces = did.listFiles();
+            if (faces == null) {
+                continue;
+            }
+            for (File face : faces) {
+                if (!face.isDirectory()) {
+                    continue;
+                }
+                String newId = remapFaceId(face.getName());
+                if (newId == null || exportedFaces.contains(newId)) {
+                    continue;
+                }
+                File[] files = face.listFiles();
+                if (files == null) {
+                    continue;
+                }
+                for (File f : files) {
+                    if (!f.isFile() || f.length() < 65536 || !isCachedBinName(f.getName())) {
+                        continue;
+                    }
+                    String sig = f.getName() + ":" + f.length() + ":" + f.lastModified();
+                    if (mSeenBins.contains(sig)) {
+                        continue;
+                    }
+                    // 等它落稳：300ms 后长度/mtime 没变才认，避免读到写一半的包体
+                    long len = f.length();
+                    long mod = f.lastModified();
+                    try {
+                        Thread.sleep(300);
+                    } catch (InterruptedException ie) {
+                        return null;
+                    }
+                    if (!f.isFile() || f.length() != len || f.lastModified() != mod) {
+                        continue;
+                    }
+                    mSeenBins.add(sig);
+                    return f;
+                }
+            }
+        }
+        return null;
+    }
+
+    private void exportCachedFaces(boolean quiet) {
         if (!faceExport()) {
             return;
         }
@@ -1640,16 +1754,18 @@ public class AdAwayModule extends XposedModule {
                         continue;
                     }
                     found++;
-                    if (exportFace(face.getName())) {
+                    if (exportFace(face.getName(), quiet)) {
                         fresh++;
                     } else if (cleanOldBin(face, markedBefore)) {
                         cleaned++;
                     }
                 }
             }
-            log(Log.INFO, TAG, "export scan done: fresh=" + fresh + " found=" + found
-                    + " cleaned=" + cleaned);
-            notifyExportResult(fresh, found, cleaned);
+            if (!quiet || fresh > 0) {
+                log(Log.INFO, TAG, "export scan done: fresh=" + fresh + " found=" + found
+                        + " cleaned=" + cleaned);
+                notifyExportResult(fresh, found, cleaned);
+            }
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "export scan error", t);
         }
@@ -2000,13 +2116,19 @@ public class AdAwayModule extends XposedModule {
      * → 写 Download/face_<新ID>.bin。
      */
     private boolean exportFace(String faceId) {
+        return exportFace(faceId, false);
+    }
+
+    private boolean exportFace(String faceId, boolean quiet) {
         String newId = remapFaceId(faceId);
         if (newId == null) {
             return false; // 非 12 位 ID 直接跳过（不记 error，避免扫盘刷屏）
         }
         File src = findFaceBin(faceId);
         if (src == null) {
-            log(Log.ERROR, TAG, "face export skip: bin not found id=" + faceId);
+            if (!quiet) {
+                log(Log.ERROR, TAG, "face export skip: bin not found id=" + faceId);
+            }
             return false;
         }
         return exportBin(src, faceId);
