@@ -2004,6 +2004,13 @@ public class AdAwayModule extends XposedModule {
                 return false;
             }
             String faceName = readFaceName(src);
+            if (faceName == null) {
+                // 新版缓存目录里没有 description.xml，中文名就在包体头部（ID 字段之后那段 UTF-8）
+                faceName = readFaceNameFromBin(data, newId);
+                if (faceName != null) {
+                    log(Log.INFO, TAG, "face name from bin: " + faceName + " id=" + faceId);
+                }
+            }
             String fileName = (faceName != null ? faceName + "_" + newId : "face_" + newId) + ".bin";
             Object uri = writeToDownload(fileName, data);
             if (uri == null) {
@@ -2042,24 +2049,88 @@ public class AdAwayModule extends XposedModule {
                 return null;
             }
             String name = s.substring(a + 6, b).trim();
-            if (name.isEmpty()) {
-                return null;
-            }
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < name.length(); i++) {
-                char ch = name.charAt(i);
-                if (ch == '/' || ch == '\\' || ch == ':' || ch == '*' || ch == '?'
-                        || ch == '"' || ch == '<' || ch == '>' || ch == '|') {
-                    sb.append('_');
-                } else {
-                    sb.append(ch);
-                }
-            }
-            String clean = sb.toString().trim();
-            return clean.isEmpty() ? null : clean;
+            return sanitizeFileName(name);
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    /** 去掉文件名非法字符；空串返回 null */
+    private static String sanitizeFileName(String name) {
+        if (name == null) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < name.length(); i++) {
+            char ch = name.charAt(i);
+            if (ch == '/' || ch == '\\' || ch == ':' || ch == '*' || ch == '?'
+                    || ch == '"' || ch == '<' || ch == '>' || ch == '|') {
+                sb.append('_');
+            } else {
+                sb.append(ch);
+            }
+        }
+        String clean = sb.toString().trim();
+        return clean.isEmpty() ? null : clean;
+    }
+
+    /** 没有 description.xml 时的取名兜底：名字就写在包体头部（表盘 ID 字段之后的 UTF-8 字段） */
+    private String readFaceNameFromBin(byte[] data, String faceId) {
+        if (data == null || faceId == null) {
+            return null;
+        }
+        byte[] idB;
+        try {
+            idB = faceId.getBytes("ASCII");
+        } catch (Throwable t) {
+            return null;
+        }
+        int at = indexOfBytes(data, idB, Math.min(data.length, 64 * 1024));
+        if (at < 0) {
+            return null;
+        }
+        int p = at + idB.length;
+        int padLimit = Math.min(data.length, p + 64);
+        while (p < padLimit && data[p] == 0) {
+            p++;
+        }
+        int end = p;
+        int endLimit = Math.min(data.length, p + 128);
+        while (end < endLimit && data[end] != 0) {
+            end++;
+        }
+        if (end <= p) {
+            return null;
+        }
+        String name;
+        try {
+            name = new String(data, p, end - p, "UTF-8");
+        } catch (Throwable t) {
+            return null;
+        }
+        if (name.indexOf('\uFFFD') >= 0 || name.length() > 40) {
+            return null; // 解出替换字符说明这段不是名字字段
+        }
+        for (int i = 0; i < name.length(); i++) {
+            char ch = name.charAt(i);
+            if (ch < 0x20 || ch == 0x7F) {
+                return null;
+            }
+        }
+        return sanitizeFileName(name);
+    }
+
+    private static int indexOfBytes(byte[] hay, byte[] needle, int limit) {
+        outer:
+        for (int i = 0; i + needle.length <= limit; i++) {
+            for (int j = 0; j < needle.length; j++) {
+                if (hay[i + j] != needle[j]) {
+                    continue outer;
+                }
+            }
+            return i;
+        }
+        return -1;
     }
 
     /** 按 faceId 在 WatchFace 缓存目录搜包体 */
