@@ -2062,14 +2062,42 @@ public class AdAwayModule extends XposedModule {
         }
     }
 
-    /** 按 faceId 在 WatchFace 缓存目录搜 resource.bin */
+    /** 按 faceId 在 WatchFace 缓存目录搜包体 */
     private File findFaceBin(String faceId) {
         try {
-            return searchBin(watchFaceRoot(), faceId, 0);
+            File root = watchFaceRoot();
+            File hit = searchBin(root, faceId, 0);
+            if (hit != null) {
+                return hit;
+            }
+            // 名字对不上（新版 App 把包体存成<内容MD5>，无扩展名）→ 按包体头部的表盘 ID 兜底
+            hit = searchBinByContent(root, faceId, 0);
+            if (hit != null) {
+                log(Log.INFO, TAG, "face bin by content: " + hit.getName() + " id=" + faceId);
+            }
+            return hit;
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "face bin search error", t);
             return null;
         }
+    }
+
+    /** 缓存包体命名：老版固定 resource.bin；新版是 32 位十六进制（内容 MD5，无扩展名） */
+    private static boolean isCachedBinName(String name) {
+        if ("resource.bin".equals(name)) {
+            return true;
+        }
+        if (name == null || name.length() != 32) {
+            return false;
+        }
+        for (int i = 0; i < 32; i++) {
+            char c = name.charAt(i);
+            boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            if (!hex) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private File searchBin(File dir, String faceId, int depth) {
@@ -2081,7 +2109,7 @@ public class AdAwayModule extends XposedModule {
             return null;
         }
         for (File k : kids) {
-            if (k.isFile() && "resource.bin".equals(k.getName())
+            if (k.isFile() && isCachedBinName(k.getName())
                     && k.getAbsolutePath().contains(faceId)) {
                 return k;
             }
@@ -2093,6 +2121,67 @@ public class AdAwayModule extends XposedModule {
             }
         }
         return null;
+    }
+
+    /** 名字完全不认时的兜底：表盘 ID 就写在包体里，按内容找（>64KB 且非图片/描述文件） */
+    private File searchBinByContent(File dir, String faceId, int depth) {
+        if (dir == null || depth > 4 || !dir.isDirectory() || faceId == null) {
+            return null;
+        }
+        File[] kids = dir.listFiles();
+        if (kids == null) {
+            return null;
+        }
+        for (File k : kids) {
+            if (!k.isFile() || k.length() <= 64 * 1024) {
+                continue;
+            }
+            String n = k.getName().toLowerCase();
+            if (n.endsWith(".xml") || n.endsWith(".png") || n.endsWith(".jpg")
+                    || n.endsWith(".jpeg") || n.endsWith(".bmp") || n.endsWith(".gif")) {
+                continue;
+            }
+            try {
+                byte[] head = readHead(k, 256 * 1024);
+                if (new String(head, "ISO-8859-1").contains(faceId)) {
+                    return k;
+                }
+            } catch (Throwable ignored) {
+                // 单个文件读不了就跳过，不影响其他候选
+            }
+        }
+        for (File k : kids) {
+            File hit = searchBinByContent(k, faceId, depth + 1);
+            if (hit != null) {
+                return hit;
+            }
+        }
+        return null;
+    }
+
+    /** 只读文件头，避免为找 ID 把几十 MB 缓存全读进内存 */
+    private byte[] readHead(File f, int max) throws Throwable {
+        FileInputStream in = new FileInputStream(f);
+        try {
+            long len = f.length();
+            int want = (int) Math.min(len, (long) max);
+            byte[] buf = new byte[want];
+            int off = 0;
+            while (off < want) {
+                int n = in.read(buf, off, want - off);
+                if (n < 0) {
+                    break;
+                }
+                off += n;
+            }
+            return off == want ? buf : java.util.Arrays.copyOf(buf, off);
+        } finally {
+            try {
+                in.close();
+            } catch (Throwable ignored) {
+                // ignore
+            }
+        }
     }
 
     private byte[] readAll(File f) throws Throwable {
