@@ -29,10 +29,13 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.OutputStream;
 import java.lang.reflect.Method;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import io.github.libxposed.api.XposedModule;
@@ -1401,6 +1404,13 @@ public class AdAwayModule extends XposedModule {
     /** 哨兵见过的包体签名（名字:长度:mtime），同一份只处理一次 */
     private final Set<String> mSeenBins = Collections.synchronizedSet(new HashSet<>());
 
+    /**
+     * 完整性校验没过的包体 → 已重试次数（仅哨兵线程访问，不用同步）。
+     * 缓存文件名就是内容 MD5（实机取证），下到一半的文件必然对不上，
+     * 所以它同时是"下完了没"的判据；卡住不动的文件靠计数上限放弃，避免反复读盘。
+     */
+    private final Map<String, Integer> mBinTries = new HashMap<>();
+
     /** 当前进程名（onModuleLoaded 里拿到；用来只在主进程起哨兵） */
     private String mProcessName;
 
@@ -1714,12 +1724,67 @@ public class AdAwayModule extends XposedModule {
                     if (!f.isFile() || f.length() != len || f.lastModified() != mod) {
                         continue;
                     }
+                    // 硬校验：文件名 = 内容 MD5，下到一半必然对不上 → 没过就再等一轮
+                    if (!binComplete(f)) {
+                        int tries = mBinTries.containsKey(sig) ? mBinTries.get(sig) + 1 : 1;
+                        mBinTries.put(sig, tries);
+                        if (tries == 1) {
+                            log(Log.INFO, TAG, "face watcher: " + f.getName()
+                                    + " 完整性校验没过（还没下完？），继续等");
+                        } else if (tries >= 40) {
+                            log(Log.ERROR, TAG, "face watcher: " + f.getName()
+                                    + " 完整性校验连续失败，丢弃这一份");
+                            mSeenBins.add(sig);
+                        }
+                        continue;
+                    }
+                    mBinTries.remove(sig);
                     mSeenBins.add(sig);
                     return f;
                 }
             }
         }
         return null;
+    }
+
+    /**
+     * 包体完整性校验：缓存文件名就是内容 MD5（实机取证：bc415b5c… 文件名 == 内容 MD5，
+     * 59 字节处还带着原始字节），下到一半的文件必然对不上，所以它同时是"下完了没"的判据。
+     * 老版固定名 resource.bin 没有这个凭据，退化为核头部魔数 5A A5 34 12。
+     */
+    private boolean binComplete(File f) {
+        try {
+            String name = f.getName();
+            if (isCachedBinName(name) && !"resource.bin".equals(name)) {
+                return name.equalsIgnoreCase(md5Of(f));
+            }
+            byte[] head = readHead(f, 16);
+            return head.length >= 4 && (head[0] & 0xFF) == 0x5A && (head[1] & 0xFF) == 0xA5
+                    && (head[2] & 0xFF) == 0x34 && (head[3] & 0xFF) == 0x12;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 文件内容 MD5（十六进制小写） */
+    private static String md5Of(File f) throws Exception {
+        MessageDigest md = MessageDigest.getInstance("MD5");
+        FileInputStream in = new FileInputStream(f);
+        try {
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                md.update(buf, 0, n);
+            }
+        } finally {
+            in.close();
+        }
+        StringBuilder sb = new StringBuilder(32);
+        for (byte b : md.digest()) {
+            sb.append(Character.forDigit((b >> 4) & 0xF, 16));
+            sb.append(Character.forDigit(b & 0xF, 16));
+        }
+        return sb.toString();
     }
 
     private void exportCachedFaces(boolean quiet) {
