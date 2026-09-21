@@ -1418,6 +1418,22 @@ public class AdAwayModule extends XposedModule {
                     try {
                         if (faceExport()) {
                             mLastPushMillis = System.currentTimeMillis();
+                            Object a0 = null;
+                            Object a1 = null;
+                            Object a2 = null;
+                            try {
+                                a0 = chain.getArg(0);
+                            } catch (Throwable ignored) {
+                            }
+                            try {
+                                a1 = chain.getArg(1);
+                            } catch (Throwable ignored) {
+                            }
+                            try {
+                                a2 = chain.getArg(2);
+                            } catch (Throwable ignored) {
+                            }
+                            exportPushTarget(a0, a1, a2);
                             exportCachedFaces();
                             scheduleExportScan();
                         }
@@ -1441,6 +1457,22 @@ public class AdAwayModule extends XposedModule {
                     try {
                         if (faceExport()) {
                             mLastPushMillis = System.currentTimeMillis();
+                            Object a0 = null;
+                            Object a1 = null;
+                            Object a2 = null;
+                            try {
+                                a0 = chain.getArg(0);
+                            } catch (Throwable ignored) {
+                            }
+                            try {
+                                a1 = chain.getArg(1);
+                            } catch (Throwable ignored) {
+                            }
+                            try {
+                                a2 = chain.getArg(2);
+                            } catch (Throwable ignored) {
+                            }
+                            exportPushTarget(a0, a1, a2);
                             exportCachedFaces();
                             scheduleExportScan();
                         }
@@ -1972,6 +2004,20 @@ public class AdAwayModule extends XposedModule {
         if (newId == null) {
             return false; // 非 12 位 ID 直接跳过（不记 error，避免扫盘刷屏）
         }
+        File src = findFaceBin(faceId);
+        if (src == null) {
+            log(Log.ERROR, TAG, "face export skip: bin not found id=" + faceId);
+            return false;
+        }
+        return exportBin(src, faceId);
+    }
+
+    /** 导出指定包体：去重 → 换 ID → 取名 → 写 Download */
+    private boolean exportBin(File src, String faceId) {
+        String newId = remapFaceId(faceId);
+        if (newId == null) {
+            return false;
+        }
         synchronized (exportedFaces) {
             if (exportedFaces.contains(newId)) {
                 markExported(newId);
@@ -1981,11 +2027,6 @@ public class AdAwayModule extends XposedModule {
         }
         if (isExportedMarked(newId)) {
             return false; // 跨进程去重（MediaStore 查询不可靠，改走 prefs 记录）
-        }
-        File src = findFaceBin(faceId);
-        if (src == null) {
-            log(Log.ERROR, TAG, "face export skip: bin not found id=" + faceId);
-            return false;
         }
         try {
             byte[] data = readAll(src);
@@ -2025,6 +2066,104 @@ public class AdAwayModule extends XposedModule {
             log(Log.ERROR, TAG, "face export error", t);
             return false;
         }
+    }
+
+    /**
+     * 推送入口的参数里带着包体路径或表盘 ID：推送前当场抓。
+     * 试用表盘的包体在推送完成后可能被 App 立刻清掉，只靠扫缓存目录会错过。
+     */
+    private void exportPushTarget(Object... args) {
+        StringBuilder sb = new StringBuilder();
+        boolean hit = false;
+        for (Object a : args) {
+            sb.append(describeArg(a)).append(" | ");
+            if (!(a instanceof String)) {
+                continue;
+            }
+            String s = ((String) a).trim();
+            if (s.startsWith("file:")) {
+                s = s.substring(5);
+            }
+            if (s.isEmpty()) {
+                continue;
+            }
+            File f = new File(s);
+            if (f.exists()) {
+                hit |= exportTree(f);
+            } else if (s.matches("\\d{12}")) {
+                hit |= exportFace(s);
+            }
+        }
+        log(Log.INFO, TAG, "face push args: " + sb + (hit ? "=> hit" : "=> no hit"));
+    }
+
+    /** 抓推送目标：是文件就导，是目录就递归找（限 3 层，避免参数指向大目录时炸） */
+    private boolean exportTree(File f) {
+        return exportTree(f, 0);
+    }
+
+    private boolean exportTree(File f, int depth) {
+        try {
+            if (f.isDirectory()) {
+                if (depth >= 3) {
+                    return false;
+                }
+                File[] kids = f.listFiles();
+                if (kids == null) {
+                    return false;
+                }
+                boolean any = false;
+                for (File k : kids) {
+                    any |= exportTree(k, depth + 1);
+                }
+                return any;
+            }
+            if (!f.isFile() || f.length() < 65536) {
+                return false;
+            }
+            String id = findFaceIdInHead(readHead(f, 64 * 1024));
+            log(Log.INFO, TAG, "face push file: " + f.getName() + " " + f.length()
+                    + "B id=" + id);
+            return id != null && exportBin(f, id);
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "face push export error", t);
+            return false;
+        }
+    }
+
+    /** 包体头部里的 12 位表盘 ID（12 开头、两侧不是数字） */
+    private static String findFaceIdInHead(byte[] head) {
+        if (head == null) {
+            return null;
+        }
+        for (int i = 0; i + 12 <= head.length; i++) {
+            if (head[i] != '1' || head[i + 1] != '2') {
+                continue;
+            }
+            int j = i;
+            while (j < head.length && head[j] >= '0' && head[j] <= '9') {
+                j++;
+            }
+            if (j - i == 12) {
+                return new String(head, i, 12);
+            }
+        }
+        return null;
+    }
+
+    /** 参数摘要（只进日志，便于核对推送入口到底传了什么） */
+    private static String describeArg(Object a) {
+        if (a == null) {
+            return "null";
+        }
+        if (a instanceof String) {
+            String s = (String) a;
+            return "str(" + (s.length() > 120 ? s.substring(0, 120) + "…" : s) + ")";
+        }
+        if (a instanceof byte[]) {
+            return "bytes[" + ((byte[]) a).length + "]";
+        }
+        return a.getClass().getSimpleName();
     }
 
     /** 从同目录 description.xml 读表盘中文名（供导出文件名用，失败返回 null） */
